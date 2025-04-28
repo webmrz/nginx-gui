@@ -1,12 +1,16 @@
 use std::process::Command;
 use std::path::PathBuf;
-use tauri::{Manager, AppHandle};
+use tauri::{Manager, AppHandle, Emitter};
 use serde::{Serialize, Deserialize};
 use std::fs;
 use std::io::Write;
 use chrono::Local;
 use tokio::task;
 use reqwest;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::time::Duration;
+use serde_json::json;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NginxStatus {
@@ -16,14 +20,23 @@ pub struct NginxStatus {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct NginxService {
     app_handle: AppHandle,
+    status_monitor: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    last_status: Arc<Mutex<String>>,
 }
 
 impl NginxService {
     pub fn new(app_handle: AppHandle) -> Self {
-        let service = Self { app_handle };
+        let status_monitor = Arc::new(Mutex::new(None));
+        let last_status = Arc::new(Mutex::new("stopped".to_string()));
+        
+        let service = Self {
+            app_handle,
+            status_monitor,
+            last_status,
+        };
         
         // 初始化日志目录
         if let Err(e) = service.init_log_dirs() {
@@ -104,15 +117,6 @@ impl NginxService {
         }
     }
 
-    fn emit_status_change(&self) {
-        println!("[INFO] Nginx status changed");
-        // 先注释掉事件通知代码，以确保应用能启动
-        // 未来可以研究正确的 Tauri v2 事件API实现
-        // if let Err(e) = self.app_handle.emit_to("main", "nginx-status-change", ()) {
-        //     println!("[WARN] Failed to emit status change event: {}", e);
-        // }
-    }
-
     pub async fn start(&self) -> Result<(), String> {
         let nginx_path = self.get_nginx_path();
         let nginx_exe = nginx_path.join("nginx.exe");
@@ -126,6 +130,16 @@ impl NginxService {
             println!("[ERROR] {}", error_msg);
             println!("[INFO] Please ensure nginx.exe is placed in the nginx-1.24.0 directory");
             self.log_operation("start", error_msg);
+            
+            // 向前端发送启动失败通知
+            let _ = self.app_handle.emit("nginx-operation-result", json!({
+                "operation": "start",
+                "success": false,
+                "message": error_msg
+            })).unwrap_or_else(|e| {
+                println!("[ERROR] 发送操作结果失败: {}", e);
+            });
+            
             return Err(error_msg.to_string());
         }
 
@@ -150,6 +164,16 @@ impl NginxService {
         if output_str.contains("nginx.exe") {
             println!("[WARN] Nginx is already running");
             self.log_operation("start", "Nginx is already running");
+            
+            // 向前端发送已经在运行的通知
+            let _ = self.app_handle.emit("nginx-operation-result", json!({
+                "operation": "start",
+                "success": true,
+                "message": "Nginx is already running"
+            })).unwrap_or_else(|e| {
+                println!("[ERROR] 发送操作结果失败: {}", e);
+            });
+            
             return Ok(());
         }
 
@@ -163,11 +187,39 @@ impl NginxService {
         }).await.map_err(|e| {
             let error_msg = format!("Failed to spawn task: {}", e);
             println!("[ERROR] {}", error_msg);
+            
+            // 向前端发送启动失败通知
+            let app_handle = self.app_handle.clone();
+            let error_msg_clone = error_msg.clone();
+            tokio::spawn(async move {
+                let _ = app_handle.emit("nginx-operation-result", json!({
+                    "operation": "start",
+                    "success": false,
+                    "message": error_msg_clone
+                })).unwrap_or_else(|e| {
+                    println!("[ERROR] 发送操作结果失败: {}", e);
+                });
+            });
+            
             error_msg
         })?
         .map_err(|e| {
             let error_msg = format!("Failed to start Nginx: {}", e);
             println!("[ERROR] {}", error_msg);
+            
+            // 向前端发送启动失败通知
+            let app_handle = self.app_handle.clone();
+            let error_msg_clone = error_msg.clone();
+            tokio::spawn(async move {
+                let _ = app_handle.emit("nginx-operation-result", json!({
+                    "operation": "start",
+                    "success": false,
+                    "message": error_msg_clone
+                })).unwrap_or_else(|e| {
+                    println!("[ERROR] 发送操作结果失败: {}", e);
+                });
+            });
+            
             error_msg
         })?;
 
@@ -175,6 +227,16 @@ impl NginxService {
             let error_msg = format!("Nginx failed to start with status: {:?}", status.code());
             println!("[ERROR] {}", error_msg);
             self.log_operation("start", &error_msg);
+            
+            // 向前端发送启动失败通知
+            let _ = self.app_handle.emit("nginx-operation-result", json!({
+                "operation": "start",
+                "success": false,
+                "message": error_msg
+            })).unwrap_or_else(|e| {
+                println!("[ERROR] 发送操作结果失败: {}", e);
+            });
+            
             return Err(error_msg);
         }
 
@@ -189,6 +251,16 @@ impl NginxService {
         println!("[INFO] Nginx started successfully");
         self.log_operation("start", "Nginx started successfully");
         self.emit_status_change();
+        
+        // 向前端发送启动成功通知
+        let _ = self.app_handle.emit("nginx-operation-result", json!({
+            "operation": "start",
+            "success": true,
+            "message": "Nginx started successfully"
+        })).unwrap_or_else(|e| {
+            println!("[ERROR] 发送操作结果失败: {}", e);
+        });
+        
         Ok(())
     }
 
@@ -197,8 +269,19 @@ impl NginxService {
         let nginx_exe = nginx_path.join("nginx.exe");
         
         if !nginx_exe.exists() {
-            self.log_operation("stop", "Nginx executable not found");
-            return Err("Nginx executable not found".to_string());
+            let error_msg = "Nginx executable not found";
+            self.log_operation("stop", error_msg);
+            
+            // 向前端发送停止失败通知
+            let _ = self.app_handle.emit("nginx-operation-result", json!({
+                "operation": "stop",
+                "success": false,
+                "message": error_msg
+            })).unwrap_or_else(|e| {
+                println!("[ERROR] 发送操作结果失败: {}", e);
+            });
+            
+            return Err(error_msg.to_string());
         }
 
         let nginx_path_clone = nginx_path.clone();
@@ -209,16 +292,70 @@ impl NginxService {
                 .arg("stop")
                 .current_dir(nginx_path_clone)
                 .output()
-        }).await.map_err(|e| format!("Failed to spawn task: {}", e))?
-          .map_err(|e| format!("Failed to stop Nginx: {}", e))?;
+        }).await.map_err(|e| {
+            let error_msg = format!("Failed to spawn task: {}", e);
+            
+            // 向前端发送停止失败通知
+            let app_handle = self.app_handle.clone();
+            let error_msg_clone = error_msg.clone();
+            tokio::spawn(async move {
+                let _ = app_handle.emit("nginx-operation-result", json!({
+                    "operation": "stop",
+                    "success": false,
+                    "message": error_msg_clone
+                })).unwrap_or_else(|e| {
+                    println!("[ERROR] 发送操作结果失败: {}", e);
+                });
+            });
+            
+            error_msg
+        })?
+          .map_err(|e| {
+            let error_msg = format!("Failed to stop Nginx: {}", e);
+            
+            // 向前端发送停止失败通知
+            let app_handle = self.app_handle.clone();
+            let error_msg_clone = error_msg.clone();
+            tokio::spawn(async move {
+                let _ = app_handle.emit("nginx-operation-result", json!({
+                    "operation": "stop",
+                    "success": false,
+                    "message": error_msg_clone
+                })).unwrap_or_else(|e| {
+                    println!("[ERROR] 发送操作结果失败: {}", e);
+                });
+            });
+            
+            error_msg
+        })?;
 
         if result.status.success() {
             self.log_operation("stop", "Service stopped successfully");
             self.emit_status_change();
+            
+            // 向前端发送停止成功通知
+            let _ = self.app_handle.emit("nginx-operation-result", json!({
+                "operation": "stop",
+                "success": true,
+                "message": "Nginx stopped successfully"
+            })).unwrap_or_else(|e| {
+                println!("[ERROR] 发送操作结果失败: {}", e);
+            });
+            
             Ok(())
         } else {
             let error = String::from_utf8_lossy(&result.stderr).to_string();
             self.log_operation("stop", &format!("Failed to stop service: {}", error));
+            
+            // 向前端发送停止失败通知
+            let _ = self.app_handle.emit("nginx-operation-result", json!({
+                "operation": "stop",
+                "success": false,
+                "message": format!("Failed to stop Nginx: {}", error)
+            })).unwrap_or_else(|e| {
+                println!("[ERROR] 发送操作结果失败: {}", e);
+            });
+            
             Err(error)
         }
     }
@@ -689,37 +826,75 @@ impl NginxService {
             return Ok(0);
         }
         
+        println!("[DEBUG] 获取Nginx总连接数，尝试访问stub_status页面");
+        
         // 尝试从 stub_status 页面获取数据
         match reqwest::get("http://localhost/nginx_status").await {
             Ok(response) => {
                 if response.status().is_success() {
                     match response.text().await {
                         Ok(text) => {
-                            // 解析 stub_status 输出，查找总连接数
+                            println!("[DEBUG] 获取到的stub_status内容: {}", text);
+                            
+                            // 将多行文本拆分为行
+                            let lines: Vec<&str> = text.lines().collect();
+                            
+                            // 如果有足够的行，按照标准Nginx stub_status格式解析
+                            // 标准格式例如:
+                            // Active connections: 1 
+                            // server accepts handled requests
+                            // 16630 16630 31070 
+                            // Reading: 0 Writing: 1 Waiting: 0
+                            if lines.len() >= 3 {
+                                // 第三行包含统计数据，第一个数字是接受的连接总数
+                                let stats_line = lines[2].trim();
+                                let parts: Vec<&str> = stats_line.split_whitespace().collect();
+                                
+                                if !parts.is_empty() {
+                                    if let Ok(count) = parts[0].parse::<usize>() {
+                                        println!("[INFO] 成功解析到总连接数: {}", count);
+                                        return Ok(count);
+                                    } else {
+                                        println!("[ERROR] 无法将 '{}' 解析为数字", parts[0]);
+                                    }
+                                } else {
+                                    println!("[ERROR] 统计行没有数据: '{}'", stats_line);
+                                }
+                            } else {
+                                println!("[ERROR] stub_status返回的行数不足 ({}行)", lines.len());
+                            }
+                            
+                            // 如果上面的解析失败，尝试查找包含"accepts"的行（旧方法）
                             for line in text.lines() {
                                 if line.contains("accepts") {
-                                    if let Some(count_str) = line.split_whitespace().nth(1) {
-                                        if let Ok(count) = count_str.parse::<usize>() {
-                                            return Ok(count);
+                                    // 下一行应该包含数字
+                                    if let Some(next_line) = text.lines().skip_while(|l| !l.contains("accepts")).skip(1).next() {
+                                        let parts: Vec<&str> = next_line.trim().split_whitespace().collect();
+                                        if !parts.is_empty() {
+                                            if let Ok(count) = parts[0].parse::<usize>() {
+                                                println!("[INFO] 使用备选方法成功解析到总连接数: {}", count);
+                                                return Ok(count);
+                                            }
                                         }
                                     }
                                 }
                             }
-                            println!("[ERROR] Failed to parse total connections from stub_status");
+                            
+                            println!("[ERROR] 无法从stub_status解析总连接数");
                             Ok(0)
                         },
                         Err(e) => {
-                            println!("[ERROR] Failed to read stub_status response: {}", e);
+                            println!("[ERROR] 读取stub_status响应失败: {}", e);
                             Ok(0)
                         }
                     }
                 } else {
-                    println!("[ERROR] Failed to get stub_status, status: {}", response.status());
+                    println!("[ERROR] 获取stub_status失败，状态码: {}", response.status());
                     Ok(0)
                 }
             },
             Err(e) => {
-                println!("[ERROR] Failed to connect to stub_status: {}", e);
+                println!("[ERROR] 连接到stub_status失败: {}", e);
                 Ok(0)
             }
         }
@@ -927,6 +1102,86 @@ impl NginxService {
             requests_per_second,
         })
     }
+
+    pub async fn start_status_monitor(&self) {
+        let app_handle = self.app_handle.clone();
+        let status_monitor = self.status_monitor.clone();
+        let last_status = self.last_status.clone();
+
+        // 如果已经有监控任务在运行，先停止它
+        if let Some(handle) = status_monitor.lock().await.take() {
+            handle.abort();
+        }
+
+        // 启动新的监控任务
+        let handle = tokio::spawn(async move {
+            loop {
+                // 检查 Nginx 状态
+                let current_status = match Command::new("tasklist")
+                    .arg("/FI")
+                    .arg("IMAGENAME eq nginx.exe")
+                    .output()
+                {
+                    Ok(output) => {
+                        let output_str = String::from_utf8_lossy(&output.stdout).to_string();
+                        if output_str.contains("nginx.exe") {
+                            "running".to_string()
+                        } else {
+                            "stopped".to_string()
+                        }
+                    },
+                    Err(_) => "stopped".to_string(),
+                };
+
+                // 检查状态是否发生变化
+                let mut last_status_guard = last_status.lock().await;
+                if *last_status_guard != current_status {
+                    // 状态发生变化，发送事件
+                    let _ = app_handle.emit("nginx-status-changed", &current_status).unwrap_or_else(|e| {
+                        println!("[ERROR] 发送事件失败: {}", e);
+                    }); 
+                    *last_status_guard = current_status;
+                }
+
+                // 等待一段时间后再次检查
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+
+        // 保存监控任务的句柄
+        *self.status_monitor.lock().await = Some(handle);
+    }
+
+    pub async fn stop_status_monitor(&self) {
+        if let Some(handle) = self.status_monitor.lock().await.take() {
+            handle.abort();
+        }
+    }
+
+    fn emit_status_change(&self) {
+        println!("[INFO] Nginx status changed");
+        // 获取当前状态
+        let status = match std::process::Command::new("tasklist")
+            .arg("/FI")
+            .arg("IMAGENAME eq nginx.exe")
+            .output()
+        {
+            Ok(output) => {
+                let output_str = String::from_utf8_lossy(&output.stdout).to_string();
+                if output_str.contains("nginx.exe") {
+                    "running".to_string()
+                } else {
+                    "stopped".to_string()
+                }
+            },
+            Err(_) => "stopped".to_string(),
+        };
+
+        // 使用emit发送全局事件，保持和status_monitor一致的事件名
+        let _ = self.app_handle.emit("nginx-status-changed", &status).unwrap_or_else(|e| {
+            println!("[WARN] Failed to emit status change event: {}", e);
+        });
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -949,6 +1204,15 @@ pub struct DashboardStats {
     pub memory_usage: String,
     pub cpu_usage: String,
     pub uptime: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NginxMetrics {
+    pub cpu_usage: Option<String>,
+    pub memory_usage: Option<String>,
+    pub active_connections: Option<usize>,
+    pub total_connections: Option<usize>,
+    pub requests_per_second: Option<f64>,
 }
 
 #[tauri::command]
@@ -1047,4 +1311,51 @@ pub async fn check_log_exists(nginx_service: tauri::State<'_, NginxService>, log
     };
     
     Ok(log_file.exists())
+}
+
+// 新增的性能监控专用命令
+#[tauri::command]
+pub async fn get_nginx_metrics(state: tauri::State<'_, NginxService>) -> Result<NginxMetrics, String> {
+    let service = state.inner();
+    
+    // 创建一个空的指标对象
+    let mut metrics = NginxMetrics {
+        cpu_usage: None,
+        memory_usage: None,
+        active_connections: None,
+        total_connections: None,
+        requests_per_second: None,
+    };
+    
+    // 并行获取各项指标
+    let (cpu_usage, memory_usage, active_connections, total_connections, requests_per_second) = tokio::join!(
+        service.get_cpu_usage(),
+        service.get_memory_usage(),
+        service.get_active_connections(),
+        service.get_total_connections(),
+        service.get_requests_per_second()
+    );
+    
+    // 填充指标对象，进行必要的类型转换
+    if let Ok(cpu) = cpu_usage {
+        metrics.cpu_usage = Some(format!("{:.1}%", cpu));
+    }
+    
+    if let Ok(memory) = memory_usage {
+        metrics.memory_usage = Some(format!("{:.1}%", memory));
+    }
+    
+    if let Ok(active) = active_connections {
+        metrics.active_connections = Some(active);
+    }
+    
+    if let Ok(total) = total_connections {
+        metrics.total_connections = Some(total);
+    }
+    
+    if let Ok(rps) = requests_per_second {
+        metrics.requests_per_second = Some(rps as f64);
+    }
+    
+    Ok(metrics)
 } 

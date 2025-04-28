@@ -132,16 +132,19 @@ const fetchLogs = async () => {
   try {
     loading.value = true
     error.value = ''
-    const result = await invoke<string>('get_logs', {
+    console.log(`[DEBUG] 开始获取日志，类型: ${selectedLogType.value}, 行数: ${pageSize.value}`)
+    const result = await invoke<string>('get_nginx_logs', {
       logType: selectedLogType.value,
-      numLine: pageSize.value,
+      lines: pageSize.value,
       search: searchQuery.value || undefined,
       level: logLevel.value || undefined
     })
     logs.value = result.split('\n')
+    console.log(`[INFO] 成功获取日志，共 ${logs.value.length} 行`)
     await nextTick()
     scrollToBottom()
   } catch (err) {
+    console.error('[ERROR] 获取日志失败:', err)
     error.value = err instanceof Error ? err.message : '获取日志失败'
     message.error('获取日志失败')
   } finally {
@@ -316,7 +319,7 @@ onUnmounted(() => {
           placeholder="日志级别"
           @update:value="fetchLogs"
         />
-        <NButton
+        <!-- <NButton
           :type="autoRefresh ? 'primary' : 'default'"
           @click="toggleAutoRefresh"
         >
@@ -326,7 +329,7 @@ onUnmounted(() => {
             </NIcon>
           </template>
           自动刷新
-        </NButton>
+        </NButton> -->
         <NButton
           type="info"
           @click="openLogFolder"

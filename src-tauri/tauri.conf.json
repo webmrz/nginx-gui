@@ -29,6 +29,12 @@
           "identifier": "dialog",
           "permissions": ["dialog:allow-open", "dialog:allow-save"],
           "windows": ["main"]
+        },
+        {
+          "name": "default",
+          "identifier": "default",
+          "permissions": ["core:default", "core:event:allow-listen", "core:event:allow-emit"],
+          "windows": ["main"]
         }
       ]
     }

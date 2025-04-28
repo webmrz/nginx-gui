@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 
 // 服务信息接口
 export interface ServiceInfo {
@@ -64,12 +65,33 @@ export const useNginxStore = defineStore('nginx', () => {
   const error = computed(() => state.value.error)
   const loading = computed(() => state.value.loading)
   
+    // 监听状态变化
+    const setupStatusListener = async () => {
+      try {
+        // await listen<string>('nginx-operation-result', (event) => {
+        //   const result = event.payload
+        //   console.log(result,'nginx-operation-result====')
+        // })
+
+        await listen<string>('nginx-status-changed', (event) => {
+          const newStatus = event.payload
+          // 如果状态变为运行中，获取完整服务信息
+          console.log(newStatus,'====')
+          state.value.statusText = newStatus == 'running' ? '运行中' : '未运行'
+          state.value.isRunning = newStatus == 'running' 
+          state.value.loading = false
+        })
+      } catch (e) {
+        console.error('设置状态监听器失败:', e)
+      }
+    }
+
   // Actions
   const fetchStatus = async () => {
     try {
       state.value.loading = true
-      const info = await invoke<ServiceInfo>('get_service_info')
-      console.log(info,'=====')
+      const info = await invoke<ServiceInfo>('get_service_info') 
+      console.log(info,'fetchStatus=====')
       // 如果服务未运行，设置默认值
       if (info.status !== 'running') {
         state.value = {
@@ -199,6 +221,8 @@ export const useNginxStore = defineStore('nginx', () => {
     state.value = { ...initialState }
   }
 
+  // 初始化
+  setupStatusListener()
   return {
     // 状态
     state,
