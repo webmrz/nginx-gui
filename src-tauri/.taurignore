@@ -1,0 +1,11 @@
+# 忽略Nginx资源目录中的文件变化，以防止不必要的重建
+**/*.log
+**/*.pid
+**/*.conf
+**/*.conf.d
+**/*.html
+**/*.temp
+**/*.conf.d
+**/*.html
+**/logs/
+

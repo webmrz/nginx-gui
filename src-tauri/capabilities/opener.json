@@ -1,0 +1,9 @@
+{
+  "$schema": "https://github.com/tauri-apps/tauri/blob/dev/tooling/cli/schema.json",
+  "identifier": "opener",
+  "description": "Opener capability for external resources",
+  "windows": ["main"],
+  "permissions": [
+    "opener:default"
+  ]
+} 

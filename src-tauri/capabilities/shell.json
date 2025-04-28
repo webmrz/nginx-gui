@@ -1,0 +1,9 @@
+{
+  "$schema": "https://github.com/tauri-apps/tauri/blob/dev/tooling/cli/schema.json",
+  "identifier": "shell",
+  "description": "Shell access capability",
+  "windows": ["main"],
+  "permissions": [
+    "shell:default"
+  ]
+} 

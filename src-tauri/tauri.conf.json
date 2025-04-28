@@ -1,0 +1,72 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "nginx-gui",
+  "version": "0.1.0",
+  "identifier": "com.nginx-gui.app",
+  "build": {
+    "beforeDevCommand": "bun dev",
+    "beforeBuildCommand": "bun build",
+    "devUrl": "http://localhost:1421",
+    "frontendDist": "../dist"
+  },
+  
+  "app": {
+    "windows": [
+      {
+        "title": "Nginx GUI",
+        "width": 1200,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        {
+          "name": "dialog",
+          "identifier": "dialog",
+          "permissions": ["dialog:allow-open", "dialog:allow-save"],
+          "windows": ["main"]
+        }
+      ]
+    }
+  },
+  
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  },
+  
+  "bundle": {
+    "active": true,
+    "targets": "all", 
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "externalBin": [],
+    "copyright": "© 2024 Nginx GUI",
+    "category": "DeveloperTool",
+    "shortDescription": "Nginx GUI Management Tool",
+    "longDescription": "A graphical user interface for managing Nginx web server",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "wix": {
+        "language": "zh-CN",
+        "template": null,
+        "componentRefs": [],
+        "bannerPath": null,
+        "dialogImagePath": null
+      }
+    }
+  }
+}
